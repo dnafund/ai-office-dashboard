@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Orbitron", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --color-bg-main: #000000;
+  --color-bg-card: #0A0A0A;
+  --color-bg-hover: #111111;
+
+  --color-primary: #FFFFFF;
+  --color-secondary: #525252;
+
+  --color-text-main: #FFFFFF;
+  --color-text-muted: #A3A3A3;
+  --color-text-dim: #737373;
+
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-border-light: #525252;
+
+  --color-agent-controller: #8B5CF6;
+  --color-agent-coder: #10B981;
+  --color-agent-researcher: #F59E0B;
+  --color-agent-tester: #EF4444;
+  --color-agent-reviewer: #3B82F6;
+  --color-agent-idle: #6B7280;
+
+  --color-profit: #10B981;
+  --color-loss: #EF4444;
+  --color-warning: #F59E0B;
+  --color-info: #3B82F6;
+
+  --breakpoint-3xl: 1920px;
+  --breakpoint-4xl: 2560px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-bg-main text-text-main antialiased selection:bg-white/20 selection:text-white;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-attachment: fixed;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  @apply font-display tracking-wider uppercase;
+}
+
+/* Glass Panels */
+.glass-panel {
+  @apply bg-black/80 backdrop-blur-xl border border-white/20;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.glass-card {
+  @apply bg-black/90 backdrop-blur-md border border-white/10 transition-all duration-300;
+  @apply hover:bg-white/[0.03] hover:border-white/20;
+}
+
+/* Text Glow */
+.text-glow {
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: black; }
+::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full hover:bg-white/30 transition-colors;
+}
+
+/* Animations */
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.8; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.live-dot {
+  position: relative;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background-color: #10B981;
+  flex-shrink: 0;
+}
+
+.live-dot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background-color: #10B981;
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+.live-dot--danger {
+  background-color: #EF4444;
+}
+
+.live-dot--danger::before {
+  background-color: #EF4444;
+}
+
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter {
+  animation: page-enter 0.3s ease-out;
+}
+
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.card-stagger {
+  animation: card-enter 0.4s ease-out backwards;
+}
+
+.card-stagger:nth-child(1) { animation-delay: 0ms; }
+.card-stagger:nth-child(2) { animation-delay: 60ms; }
+.card-stagger:nth-child(3) { animation-delay: 120ms; }
+.card-stagger:nth-child(4) { animation-delay: 180ms; }
+.card-stagger:nth-child(5) { animation-delay: 240ms; }
+.card-stagger:nth-child(6) { animation-delay: 300ms; }
+.card-stagger:nth-child(7) { animation-delay: 360ms; }
+.card-stagger:nth-child(8) { animation-delay: 420ms; }
+
+/* Pixel Art Canvas */
+canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+@keyframes typing-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
