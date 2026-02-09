@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
-// Smart WS URL: localhost dev → direct to daemon, remote (cloudflare) → use /ws proxy
+// Smart WS URL:
+// - localhost → direct to daemon ws://localhost:3001
+// - LAN IP / Cloudflare → go through Vite proxy /ws
 function getWsUrl() {
-  const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  if (isLocalhost) return 'ws://localhost:3001'
-  // Remote access (Cloudflare tunnel etc) — go through Vite proxy
+  const h = window.location.hostname
+  if (h === 'localhost' || h === '127.0.0.1') return 'ws://localhost:3001'
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}/ws`
 }
