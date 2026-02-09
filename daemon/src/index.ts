@@ -1,9 +1,10 @@
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { TeamWatcher } from './watcher.js'
 import { readAllActivity } from './inbox.js'
+import { createTeam, deleteTeam, addAgent, removeAgent, updateAgent } from './manager.js'
 import type { ActivityMessage, DashboardState, WsMessage } from './types.js'
 
 const PORT = Number(process.env.PORT ?? 3001)
@@ -41,11 +42,34 @@ async function broadcast(): Promise<void> {
   }
 }
 
-// HTTP server for REST endpoint
-const server = createServer((req, res) => {
-  // CORS headers
+// ─── HTTP helpers ────────────────────────────────────────────
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => chunks.push(chunk))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+    req.on('error', reject)
+  })
+}
+
+function json(res: ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(data))
+}
+
+function parseUrl(url: string): { path: string; segments: string[] } {
+  const path = url.split('?')[0]
+  const segments = path.split('/').filter(Boolean)
+  return { path, segments }
+}
+
+// ─── HTTP server ─────────────────────────────────────────────
+
+const server = createServer(async (req, res) => {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 
   if (req.method === 'OPTIONS') {
@@ -54,19 +78,69 @@ const server = createServer((req, res) => {
     return
   }
 
-  if (req.url === '/api/teams' && req.method === 'GET') {
-    buildState().then((state) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(state))
-    }).catch(() => {
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'Internal error' }))
-    })
-    return
-  }
+  const { path, segments } = parseUrl(req.url ?? '/')
 
-  res.writeHead(404, { 'Content-Type': 'application/json' })
-  res.end(JSON.stringify({ error: 'Not found' }))
+  try {
+    // GET /api/teams — list all teams + activity
+    if (path === '/api/teams' && req.method === 'GET') {
+      const state = await buildState()
+      return json(res, 200, state)
+    }
+
+    // POST /api/teams — create team { name: string }
+    if (path === '/api/teams' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req))
+      const result = await createTeam(TEAMS_DIR, body.name)
+      await watcher.rescan()
+      broadcast()
+      return json(res, 201, result)
+    }
+
+    // DELETE /api/teams/:teamId — delete team
+    if (segments[0] === 'api' && segments[1] === 'teams' && segments.length === 3 && req.method === 'DELETE') {
+      const teamId = segments[2]
+      await deleteTeam(TEAMS_DIR, teamId)
+      await watcher.rescan()
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    // POST /api/teams/:teamId/agents — add agent { name, agentType }
+    if (segments[0] === 'api' && segments[1] === 'teams' && segments[3] === 'agents' && segments.length === 4 && req.method === 'POST') {
+      const teamId = segments[2]
+      const body = JSON.parse(await readBody(req))
+      const member = await addAgent(TEAMS_DIR, teamId, body.name, body.agentType)
+      await watcher.rescan()
+      broadcast()
+      return json(res, 201, member)
+    }
+
+    // PUT /api/teams/:teamId/agents/:agentId — update agent
+    if (segments[0] === 'api' && segments[1] === 'teams' && segments[3] === 'agents' && segments.length === 5 && req.method === 'PUT') {
+      const teamId = segments[2]
+      const agentId = segments[4]
+      const body = JSON.parse(await readBody(req))
+      await updateAgent(TEAMS_DIR, teamId, agentId, body)
+      await watcher.rescan()
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    // DELETE /api/teams/:teamId/agents/:agentId — remove agent
+    if (segments[0] === 'api' && segments[1] === 'teams' && segments[3] === 'agents' && segments.length === 5 && req.method === 'DELETE') {
+      const teamId = segments[2]
+      const agentId = segments[4]
+      await removeAgent(TEAMS_DIR, teamId, agentId)
+      await watcher.rescan()
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    json(res, 404, { error: 'Not found' })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Internal error'
+    json(res, 500, { error: message })
+  }
 })
 
 // WebSocket server
@@ -102,7 +176,7 @@ wss.on('connection', (ws) => {
 
 // Start
 async function main(): Promise<void> {
-  await watcher.start((teams) => {
+  await watcher.start(() => {
     // File change detected — broadcast immediately
     broadcast()
   })

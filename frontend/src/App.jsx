@@ -7,6 +7,7 @@ import { OrgChart } from './components/orgchart/OrgChart.jsx'
 import { StatusBar } from './components/ui/StatusBar.jsx'
 import { AgentTooltip } from './components/ui/AgentTooltip.jsx'
 import { ActivityFeed } from './components/ui/ActivityFeed.jsx'
+import { AgentPanel } from './components/ui/AgentPanel.jsx'
 import { setGlobalRoomOverride } from './components/office/Agent.js'
 
 export function App() {
@@ -83,6 +84,9 @@ export function App() {
           <OrgChart teams={teams} />
         )}
       </div>
+
+      {/* Agent Management Panel */}
+      <AgentPanel teams={teams} connected={connected} />
 
       <ActivityFeed activity={activity} />
       <StatusBar teams={teams} connected={connected} />

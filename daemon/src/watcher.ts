@@ -48,6 +48,10 @@ export class TeamWatcher {
     return this.currentTeams
   }
 
+  async rescan(): Promise<void> {
+    await this.scan()
+  }
+
   private debouncedScan(): void {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer)
