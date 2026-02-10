@@ -146,3 +146,28 @@ canvas {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+/* Toast notification */
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(-8px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toast-exit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+.toast-enter {
+  animation: toast-enter 0.2s ease-out;
+}
+
+/* Keyboard hints */
+.keyboard-hint {
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+}
+
+.keyboard-hint:hover {
+  opacity: 0.8;
+}

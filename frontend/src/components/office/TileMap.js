@@ -514,11 +514,16 @@ const TILE_DRAW = {
   12: drawSofa,
 }
 
-export function drawTileMap(ctx, scale = 2) {
+export function drawTileMap(ctx, scale = 2, bounds = null) {
   const s = TILE_SIZE * scale
 
-  for (let y = 0; y < MAP_HEIGHT; y++) {
-    for (let x = 0; x < MAP_WIDTH; x++) {
+  const minX = bounds ? Math.max(0, bounds.minTileX) : 0
+  const minY = bounds ? Math.max(0, bounds.minTileY) : 0
+  const maxX = bounds ? Math.min(MAP_WIDTH, bounds.maxTileX) : MAP_WIDTH
+  const maxY = bounds ? Math.min(MAP_HEIGHT, bounds.maxTileY) : MAP_HEIGHT
+
+  for (let y = minY; y < maxY; y++) {
+    for (let x = minX; x < maxX; x++) {
       const tileId = MAP_DATA[y * MAP_WIDTH + x]
       const drawFn = TILE_DRAW[tileId] ?? TILE_DRAW[0]
       drawFn(ctx, x * s, y * s, s)

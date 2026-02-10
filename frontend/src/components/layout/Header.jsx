@@ -9,7 +9,7 @@ const ROOM_COMMANDS = [
   { room: 'QA Room', label: 'QA Room', icon: '🧪' },
 ]
 
-export function Header({ view, onViewChange, connected, currentRoom, onRoomCommand }) {
+export function Header({ connected, currentRoom, onRoomCommand }) {
   return (
     <header className="glass-panel rounded-lg px-6 py-3 flex items-center gap-4">
       {/* Logo */}
@@ -20,42 +20,24 @@ export function Header({ view, onViewChange, connected, currentRoom, onRoomComma
         </h1>
       </div>
 
-      {/* View toggle */}
-      <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1">
-        <ViewButton
-          active={view === 'office'}
-          onClick={() => onViewChange('office')}
-          label="Office"
-          icon="🎮"
-        />
-        <ViewButton
-          active={view === 'orgchart'}
-          onClick={() => onViewChange('orgchart')}
-          label="Org Chart"
-          icon="📊"
-        />
-      </div>
-
       {/* Room commands */}
-      {view === 'office' && (
-        <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1 ml-2">
-          {ROOM_COMMANDS.map((cmd) => (
-            <button
-              key={cmd.label}
-              onClick={() => onRoomCommand?.(cmd.room)}
-              className={cn(
-                'px-2 py-1 rounded text-[10px] font-mono transition-all',
-                currentRoom === cmd.room
-                  ? 'bg-white/15 text-white'
-                  : 'text-text-dim hover:text-text-muted hover:bg-white/5'
-              )}
-              title={cmd.room ? `Move all agents to ${cmd.room}` : 'Auto-assign rooms'}
-            >
-              {cmd.icon}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1 ml-2">
+        {ROOM_COMMANDS.map((cmd) => (
+          <button
+            key={cmd.label}
+            onClick={() => onRoomCommand?.(cmd.room)}
+            className={cn(
+              'px-2 py-1 rounded text-[10px] font-mono transition-all',
+              currentRoom === cmd.room
+                ? 'bg-white/15 text-white'
+                : 'text-text-dim hover:text-text-muted hover:bg-white/5'
+            )}
+            title={cmd.room ? `Move all agents to ${cmd.room}` : 'Auto-assign rooms'}
+          >
+            {cmd.icon}
+          </button>
+        ))}
+      </div>
 
       {/* Spacer */}
       <div className="flex-1" />
@@ -72,21 +54,5 @@ export function Header({ view, onViewChange, connected, currentRoom, onRoomComma
         </span>
       </div>
     </header>
-  )
-}
-
-function ViewButton({ active, onClick, label, icon }) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'px-3 py-1.5 rounded-md text-xs font-mono transition-all',
-        active
-          ? 'bg-white/10 text-white'
-          : 'text-text-dim hover:text-text-muted hover:bg-white/5'
-      )}
-    >
-      {icon} {label}
-    </button>
   )
 }
