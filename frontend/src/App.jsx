@@ -8,13 +8,15 @@ import { AgentTooltip } from './components/ui/AgentTooltip.jsx'
 import { ActivityFeed } from './components/ui/ActivityFeed.jsx'
 import { AgentPanel } from './components/ui/AgentPanel.jsx'
 import { TaskPanel } from './components/ui/TaskPanel.jsx'
+import { AgentOutputPanel } from './components/ui/AgentOutputPanel.jsx'
 import { setGlobalRoomOverride } from './components/office/Agent.js'
 
 export function App() {
-  const { data, connected } = useWebSocket()
+  const { data, connected, executions, outputHistory, clearOutput } = useWebSocket()
   const [hoveredAgent, setHoveredAgent] = useState(null)
   const [selectedAgent, setSelectedAgent] = useState(null)
   const [currentRoom, setCurrentRoom] = useState(null)
+  const [viewingOutput, setViewingOutput] = useState(null)
 
   const handleAgentHover = useCallback((agent) => {
     setHoveredAgent(agent)
@@ -29,6 +31,14 @@ export function App() {
   const handleRoomCommand = useCallback((room) => {
     setCurrentRoom(room)
     setGlobalRoomOverride(room)
+  }, [])
+
+  const handleViewOutput = useCallback((teamId, taskId) => {
+    setViewingOutput({ teamId, taskId })
+  }, [])
+
+  const handleCloseOutput = useCallback(() => {
+    setViewingOutput(null)
   }, [])
 
   const teams = data.teams ?? []
@@ -80,7 +90,23 @@ export function App() {
 
       {/* Bottom panels */}
       <AgentPanel teams={teams} connected={connected} />
-      <TaskPanel tasks={tasks} teams={teams} />
+      <TaskPanel
+        tasks={tasks}
+        teams={teams}
+        executions={executions}
+        outputHistory={outputHistory}
+        onViewOutput={handleViewOutput}
+      />
+      {viewingOutput && (
+        <AgentOutputPanel
+          teamId={viewingOutput.teamId}
+          taskId={viewingOutput.taskId}
+          outputHistory={outputHistory}
+          executions={executions}
+          onClose={handleCloseOutput}
+          onClear={clearOutput}
+        />
+      )}
       <ActivityFeed activity={activity} />
       <StatusBar teams={teams} connected={connected} />
     </Layout>

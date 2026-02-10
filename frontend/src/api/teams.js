@@ -48,3 +48,43 @@ export function updateAgent(teamId, agentId, updates) {
     body: JSON.stringify(updates),
   })
 }
+
+export function assignTask(teamId, taskId, owner) {
+  return request(`/tasks/${teamId}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ taskId, owner }),
+  })
+}
+
+export function createTaskApi(teamId, subject, description, owner) {
+  return request(`/tasks/${teamId}/create`, {
+    method: 'POST',
+    body: JSON.stringify({ subject, description, owner }),
+  })
+}
+
+export function executeTask(teamId, taskId, agentName, prompt) {
+  return request(`/tasks/${teamId}/${taskId}/execute`, {
+    method: 'POST',
+    body: JSON.stringify({ agentName, prompt }),
+  })
+}
+
+export function cancelTask(teamId, taskId) {
+  return request(`/tasks/${teamId}/${taskId}/cancel`, {
+    method: 'POST',
+  })
+}
+
+export function deleteTaskApi(teamId, taskId) {
+  return request(`/tasks/${teamId}/${taskId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function updateTaskStatus(teamId, taskId, status) {
+  return request(`/tasks/${teamId}/${taskId}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ status }),
+  })
+}

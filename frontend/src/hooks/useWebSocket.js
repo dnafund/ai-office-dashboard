@@ -13,10 +13,14 @@ const WS_URL = getWsUrl()
 const INITIAL_DELAY = 1000
 const MAX_DELAY = 30000
 
+const MAX_OUTPUT_LINES = 1000
+
 export function useWebSocket() {
-  const [data, setData] = useState({ teams: [], activity: [] })
+  const [data, setData] = useState({ teams: [], activity: [], tasks: [] })
   const [connected, setConnected] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [executions, setExecutions] = useState(new Map())
+  const [outputHistory, setOutputHistory] = useState(new Map())
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
   const reconnectDelay = useRef(INITIAL_DELAY)
@@ -42,9 +46,61 @@ export function useWebSocket() {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data)
+
           if (msg.type === 'update') {
-            setData({ teams: msg.teams ?? [], activity: msg.activity ?? [] })
+            setData({ teams: msg.teams ?? [], activity: msg.activity ?? [], tasks: msg.tasks ?? [] })
             setLastUpdated(msg.timestamp ? new Date(msg.timestamp) : new Date())
+            return
+          }
+
+          if (msg.type === 'execution_start') {
+            setExecutions((prev) => {
+              const next = new Map(prev)
+              next.set(`${msg.teamId}:${msg.taskId}`, {
+                teamId: msg.teamId,
+                taskId: msg.taskId,
+                agentName: msg.agentName,
+                startedAt: Date.now(),
+              })
+              return next
+            })
+            return
+          }
+
+          if (msg.type === 'execution_output') {
+            setOutputHistory((prev) => {
+              const key = `${msg.teamId}:${msg.taskId}`
+              const existing = prev.get(key) ?? []
+              const entry = { data: msg.data, stream: msg.stream, ts: Date.now() }
+              const updated = [...existing, entry]
+              // Keep only last N lines
+              const trimmed = updated.length > MAX_OUTPUT_LINES
+                ? updated.slice(updated.length - MAX_OUTPUT_LINES)
+                : updated
+              const next = new Map(prev)
+              next.set(key, trimmed)
+              return next
+            })
+            return
+          }
+
+          if (msg.type === 'execution_end') {
+            setExecutions((prev) => {
+              const next = new Map(prev)
+              next.delete(`${msg.teamId}:${msg.taskId}`)
+              return next
+            })
+            // Add final line to output
+            setOutputHistory((prev) => {
+              const key = `${msg.teamId}:${msg.taskId}`
+              const existing = prev.get(key) ?? []
+              const status = msg.exitCode === 0 ? 'completed' : `failed (exit ${msg.exitCode})`
+              const entry = { data: `--- Execution ${status} ---`, stream: 'system', ts: Date.now() }
+              const next = new Map(prev)
+              next.set(key, [...existing, entry])
+              return next
+            })
+            return
           }
         } catch {
           // Ignore parse errors
@@ -95,5 +151,13 @@ export function useWebSocket() {
     }
   }, [])
 
-  return { data, connected, lastUpdated, refresh }
+  const clearOutput = useCallback((teamId, taskId) => {
+    setOutputHistory((prev) => {
+      const next = new Map(prev)
+      next.delete(`${teamId}:${taskId}`)
+      return next
+    })
+  }, [])
+
+  return { data, connected, lastUpdated, refresh, executions, outputHistory, clearOutput }
 }

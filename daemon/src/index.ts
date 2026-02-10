@@ -4,25 +4,82 @@ import { join } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { TeamWatcher } from './watcher.js'
 import { readAllActivity } from './inbox.js'
+import { readAllTasks, assignTask } from './tasks.js'
 import { createTeam, deleteTeam, addAgent, removeAgent, updateAgent } from './manager.js'
-import type { ActivityMessage, DashboardState, WsMessage } from './types.js'
+import { createTask, updateTaskStatus, deleteTask } from './task-manager.js'
+import { createExecutor } from './executor.js'
+import type { ActivityMessage, DashboardState, TaskState, WsMessage, WsBroadcastMessage } from './types.js'
 
 const PORT = Number(process.env.PORT ?? 3001)
 const TEAMS_DIR = join(homedir(), '.claude', 'teams')
+const TASKS_DIR = join(homedir(), '.claude', 'tasks')
 const BROADCAST_INTERVAL = 2000
 
 const watcher = new TeamWatcher(TEAMS_DIR)
 const clients = new Set<WebSocket>()
 let cachedActivity: readonly ActivityMessage[] = []
+let cachedTasks: readonly TaskState[] = []
+
+// ─── Executor setup ─────────────────────────────────────────
+const executor = createExecutor()
+
+function broadcastMessage(msg: WsBroadcastMessage): void {
+  const payload = JSON.stringify(msg)
+  for (const client of clients) {
+    if (client.readyState === 1) {
+      client.send(payload)
+    }
+  }
+}
+
+executor.setOnStart((teamId, taskId, agentName) => {
+  broadcastMessage({
+    type: 'execution_start',
+    teamId,
+    taskId,
+    agentName,
+  })
+})
+
+executor.setOnOutput((teamId, taskId, data, stream) => {
+  broadcastMessage({
+    type: 'execution_output',
+    teamId,
+    taskId,
+    data,
+    stream,
+  })
+})
+
+executor.setOnEnd((teamId, taskId, exitCode, signal) => {
+  broadcastMessage({
+    type: 'execution_end',
+    teamId,
+    taskId,
+    exitCode,
+    signal,
+  })
+
+  // Update task status based on exit code
+  const status = exitCode === 0 ? 'completed' : 'blocked'
+  updateTaskStatus(TASKS_DIR, teamId, taskId, status).catch(() => {
+    // Best effort status update
+  })
+
+  // Trigger broadcast for updated state
+  broadcast()
+})
 
 async function buildState(): Promise<DashboardState> {
   const teams = watcher.getTeams()
   const teamIds = teams.map((t) => t.id)
   cachedActivity = await readAllActivity(TEAMS_DIR, teamIds)
+  cachedTasks = await readAllTasks(TASKS_DIR, teamIds)
 
   return {
     teams,
     activity: cachedActivity,
+    tasks: cachedTasks,
     timestamp: Date.now(),
   }
 }
@@ -136,6 +193,96 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true })
     }
 
+    // GET /api/tasks — list all tasks
+    if (path === '/api/tasks' && req.method === 'GET') {
+      const teams = watcher.getTeams()
+      const teamIds = teams.map((t) => t.id)
+      const tasks = await readAllTasks(TASKS_DIR, teamIds)
+      return json(res, 200, { tasks })
+    }
+
+    // POST /api/tasks/:teamId/assign — assign task { taskId: string, owner: string }
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'assign' && segments.length === 4 && req.method === 'POST') {
+      const teamId = segments[2]
+      const body = JSON.parse(await readBody(req))
+      if (!body.taskId || !body.owner || typeof body.taskId !== 'string' || typeof body.owner !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid taskId/owner' })
+      }
+      await assignTask(TASKS_DIR, teamId, body.taskId, body.owner)
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    // POST /api/tasks/:teamId/create — create task { subject, description?, owner? }
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'create' && segments.length === 4 && req.method === 'POST') {
+      const teamId = segments[2]
+      const body = JSON.parse(await readBody(req))
+      if (!body.subject || typeof body.subject !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid subject' })
+      }
+      const task = await createTask(TASKS_DIR, teamId, body.subject, body.description, body.owner)
+      broadcast()
+      return json(res, 201, task)
+    }
+
+    // PUT /api/tasks/:teamId/:taskId/status — update status { status }
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments[4] === 'status' && segments.length === 5 && req.method === 'PUT') {
+      const teamId = segments[2]
+      const taskId = segments[3]
+      const body = JSON.parse(await readBody(req))
+      if (!body.status || typeof body.status !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid status' })
+      }
+      const updated = await updateTaskStatus(TASKS_DIR, teamId, taskId, body.status)
+      broadcast()
+      return json(res, 200, updated)
+    }
+
+    // POST /api/tasks/:teamId/:taskId/execute — execute task { agentName, prompt? }
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments[4] === 'execute' && segments.length === 5 && req.method === 'POST') {
+      const teamId = segments[2]
+      const taskId = segments[3]
+      const body = JSON.parse(await readBody(req))
+      if (!body.agentName || typeof body.agentName !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid agentName' })
+      }
+      const prompt = body.prompt || `Execute task: ${body.agentName}`
+      await updateTaskStatus(TASKS_DIR, teamId, taskId, 'in_progress')
+      const execInfo = executor.startExecution(teamId, taskId, body.agentName, prompt)
+      broadcast()
+      return json(res, 200, execInfo)
+    }
+
+    // POST /api/tasks/:teamId/:taskId/cancel — cancel execution
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments[4] === 'cancel' && segments.length === 5 && req.method === 'POST') {
+      const teamId = segments[2]
+      const taskId = segments[3]
+      const cancelled = executor.cancelExecution(teamId, taskId)
+      if (cancelled) {
+        await updateTaskStatus(TASKS_DIR, teamId, taskId, 'blocked')
+        broadcast()
+      }
+      return json(res, 200, { ok: cancelled })
+    }
+
+    // DELETE /api/tasks/:teamId/:taskId — delete task
+    if (segments[0] === 'api' && segments[1] === 'tasks' && segments.length === 4 && req.method === 'DELETE') {
+      const teamId = segments[2]
+      const taskId = segments[3]
+      // Cancel execution if running
+      if (executor.isRunning(teamId, taskId)) {
+        executor.cancelExecution(teamId, taskId)
+      }
+      await deleteTask(TASKS_DIR, teamId, taskId)
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    // GET /api/executions — list active executions
+    if (path === '/api/executions' && req.method === 'GET') {
+      return json(res, 200, { executions: executor.getActiveExecutions() })
+    }
+
     json(res, 404, { error: 'Not found' })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Internal error'
@@ -195,4 +342,14 @@ async function main(): Promise<void> {
 main().catch((err) => {
   process.stderr.write(`Fatal error: ${err}\n`)
   process.exit(1)
+})
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  executor.shutdown()
+  process.exit(0)
+})
+process.on('SIGINT', () => {
+  executor.shutdown()
+  process.exit(0)
 })
