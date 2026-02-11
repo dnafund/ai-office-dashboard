@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "neural-memory": {
+      "command": "C:\\Python314\\python.exe",
+      "args": ["-m", "neural_memory.mcp"],
+      "env": {
+        "NEURALMEMORY_BRAIN": "ai-office-dashboard"
+      }
+    }
+  }
+}
