@@ -280,7 +280,37 @@ function TaskRow({ task, teamId, members, isExecuting, lastOutput, onViewOutput 
   )
 }
 
-export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, onViewOutput }) {
+function SessionPoolIndicator({ sessions = [] }) {
+  const idle = sessions.filter((s) => s.state === 'idle').length
+  const busy = sessions.filter((s) => s.state === 'busy').length
+  const starting = sessions.filter((s) => s.state === 'starting').length
+  const total = sessions.length
+
+  if (total === 0) return null
+
+  return (
+    <div className="flex items-center gap-1.5 text-[10px] font-mono mb-2 px-1">
+      <span className="text-text-dim">Sessions:</span>
+      {idle > 0 && (
+        <span className="px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">
+          {idle} idle
+        </span>
+      )}
+      {busy > 0 && (
+        <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 animate-pulse">
+          {busy} busy
+        </span>
+      )}
+      {starting > 0 && (
+        <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
+          {starting} warming
+        </span>
+      )}
+    </div>
+  )
+}
+
+export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, onViewOutput, sessions = [] }) {
   const [expanded, setExpanded] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [createTeamId, setCreateTeamId] = useState(null)
@@ -308,6 +338,9 @@ export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, o
 
       {expanded && (
         <div className="space-y-3 max-h-80 overflow-y-auto">
+          {/* Session pool status */}
+          <SessionPoolIndicator sessions={sessions} />
+
           {/* Create task buttons per team */}
           {teams.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-2">

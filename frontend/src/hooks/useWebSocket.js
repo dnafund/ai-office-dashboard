@@ -16,11 +16,12 @@ const MAX_DELAY = 30000
 const MAX_OUTPUT_LINES = 1000
 
 export function useWebSocket() {
-  const [data, setData] = useState({ teams: [], activity: [], tasks: [] })
+  const [data, setData] = useState({ teams: [], activity: [], tasks: [], sessions: [] })
   const [connected, setConnected] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
   const [executions, setExecutions] = useState(new Map())
   const [outputHistory, setOutputHistory] = useState(new Map())
+  const [sessions, setSessions] = useState([])
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
   const reconnectDelay = useRef(INITIAL_DELAY)
@@ -48,8 +49,14 @@ export function useWebSocket() {
           const msg = JSON.parse(event.data)
 
           if (msg.type === 'update') {
-            setData({ teams: msg.teams ?? [], activity: msg.activity ?? [], tasks: msg.tasks ?? [] })
+            setData({ teams: msg.teams ?? [], activity: msg.activity ?? [], tasks: msg.tasks ?? [], sessions: msg.sessions ?? [] })
+            if (msg.sessions) setSessions(msg.sessions)
             setLastUpdated(msg.timestamp ? new Date(msg.timestamp) : new Date())
+            return
+          }
+
+          if (msg.type === 'session_state') {
+            setSessions(msg.sessions ?? [])
             return
           }
 
@@ -159,5 +166,5 @@ export function useWebSocket() {
     })
   }, [])
 
-  return { data, connected, lastUpdated, refresh, executions, outputHistory, clearOutput }
+  return { data, connected, lastUpdated, refresh, executions, outputHistory, clearOutput, sessions }
 }

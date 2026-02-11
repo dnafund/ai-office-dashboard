@@ -58,6 +58,38 @@ export interface DashboardState {
   readonly timestamp: number
 }
 
+// ─── Session types ──────────────────────────────────────────
+
+export type SessionState = 'starting' | 'idle' | 'busy' | 'stopping' | 'dead'
+
+export interface SessionInfo {
+  readonly sessionId: string
+  readonly pid?: number
+  readonly state: SessionState
+  readonly createdAt: number
+  readonly lastActiveAt: number
+  readonly currentTaskKey?: string
+  readonly totalTasksCompleted: number
+  readonly projectDir: string
+}
+
+export interface DispatchResult {
+  readonly sessionId: string
+  readonly taskKey: string
+  readonly dispatched: boolean
+  readonly reason?: string
+}
+
+export interface DispatchRequest {
+  readonly teamId: string
+  readonly taskId: string
+  readonly agentName: string
+  readonly prompt: string
+  readonly preferNewSession?: boolean
+}
+
+// ─── Execution types ────────────────────────────────────────
+
 export type ExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface ExecutionInfo {
@@ -92,11 +124,22 @@ export interface ExecutionEndMessage {
   readonly signal: string | null
 }
 
+export interface SessionStateMessage {
+  readonly type: 'session_state'
+  readonly sessions: readonly SessionInfo[]
+}
+
+export interface DispatchResultMessage {
+  readonly type: 'dispatch_result'
+  readonly result: DispatchResult
+}
+
 export interface WsMessage {
   readonly type: 'update' | 'refresh'
   readonly teams?: readonly TeamState[]
   readonly activity?: readonly ActivityMessage[]
   readonly tasks?: readonly TaskState[]
+  readonly sessions?: readonly SessionInfo[]
   readonly timestamp?: number
 }
 
@@ -105,3 +148,5 @@ export type WsBroadcastMessage =
   | ExecutionOutputMessage
   | ExecutionDataMessage
   | ExecutionEndMessage
+  | SessionStateMessage
+  | DispatchResultMessage

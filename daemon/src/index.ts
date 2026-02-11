@@ -7,12 +7,16 @@ import { readAllActivity } from './inbox.js'
 import { readAllTasks, assignTask } from './tasks.js'
 import { createTeam, deleteTeam, addAgent, removeAgent, updateAgent } from './manager.js'
 import { createTask, updateTaskStatus, deleteTask } from './task-manager.js'
+import { createSessionRegistry } from './session-registry.js'
+import { createSessionPool } from './session-pool.js'
+import { createDispatcher } from './dispatcher.js'
 import { createExecutor } from './executor.js'
 import type { ActivityMessage, DashboardState, TaskState, WsMessage, WsBroadcastMessage } from './types.js'
 
 const PORT = Number(process.env.PORT ?? 3001)
 const TEAMS_DIR = join(homedir(), '.claude', 'teams')
 const TASKS_DIR = join(homedir(), '.claude', 'tasks')
+const PROJECT_DIR = process.cwd()
 const BROADCAST_INTERVAL = 2000
 
 const watcher = new TeamWatcher(TEAMS_DIR)
@@ -20,8 +24,9 @@ const clients = new Set<WebSocket>()
 let cachedActivity: readonly ActivityMessage[] = []
 let cachedTasks: readonly TaskState[] = []
 
-// ─── Executor setup ─────────────────────────────────────────
-const executor = createExecutor()
+// ─── Session Pool + Dispatcher setup ────────────────────────
+
+const registry = createSessionRegistry()
 
 function broadcastMessage(msg: WsBroadcastMessage): void {
   const payload = JSON.stringify(msg)
@@ -32,43 +37,76 @@ function broadcastMessage(msg: WsBroadcastMessage): void {
   }
 }
 
-executor.setOnStart((teamId, taskId, agentName) => {
+function broadcastSessionState(): void {
   broadcastMessage({
-    type: 'execution_start',
-    teamId,
-    taskId,
-    agentName,
+    type: 'session_state',
+    sessions: registry.getAllSessions(),
   })
+}
+
+const pool = createSessionPool({
+  registry,
+  onOutput: (sessionId, data, stream) => {
+    dispatcher.handleSessionOutput(sessionId, data, stream)
+  },
+  onTaskComplete: (sessionId) => {
+    dispatcher.handleTaskComplete(sessionId)
+  },
+  onSessionChange: () => {
+    broadcastSessionState()
+  },
+  config: {
+    minPoolSize: 1,
+    maxPoolSize: 5,
+    idleTimeoutMs: 15 * 60 * 1000,
+    healthCheckIntervalMs: 30 * 1000,
+    projectDir: PROJECT_DIR,
+  },
 })
 
-executor.setOnOutput((teamId, taskId, data, stream) => {
-  broadcastMessage({
-    type: 'execution_output',
-    teamId,
-    taskId,
-    data,
-    stream,
-  })
+const dispatcher = createDispatcher({
+  pool,
+  registry,
+  onOutput: (teamId, taskId, data, stream) => {
+    broadcastMessage({
+      type: 'execution_output',
+      teamId,
+      taskId,
+      data,
+      stream,
+    })
+  },
+  onStart: (teamId, taskId, agentName) => {
+    broadcastMessage({
+      type: 'execution_start',
+      teamId,
+      taskId,
+      agentName,
+    })
+  },
+  onEnd: (teamId, taskId, exitCode, signal) => {
+    broadcastMessage({
+      type: 'execution_end',
+      teamId,
+      taskId,
+      exitCode,
+      signal,
+    })
+
+    // Update task status based on exit code
+    const status = exitCode === 0 ? 'completed' : 'blocked'
+    updateTaskStatus(TASKS_DIR, teamId, taskId, status).catch(() => {
+      // Best effort status update
+    })
+
+    // Trigger broadcast for updated state
+    broadcast()
+  },
 })
 
-executor.setOnEnd((teamId, taskId, exitCode, signal) => {
-  broadcastMessage({
-    type: 'execution_end',
-    teamId,
-    taskId,
-    exitCode,
-    signal,
-  })
+const executor = createExecutor(dispatcher, registry)
 
-  // Update task status based on exit code
-  const status = exitCode === 0 ? 'completed' : 'blocked'
-  updateTaskStatus(TASKS_DIR, teamId, taskId, status).catch(() => {
-    // Best effort status update
-  })
-
-  // Trigger broadcast for updated state
-  broadcast()
-})
+// ─── State builder ──────────────────────────────────────────
 
 async function buildState(): Promise<DashboardState> {
   const teams = watcher.getTeams()
@@ -80,6 +118,7 @@ async function buildState(): Promise<DashboardState> {
     teams,
     activity: cachedActivity,
     tasks: cachedTasks,
+    sessions: registry.getAllSessions(),
     timestamp: Date.now(),
   }
 }
@@ -248,7 +287,7 @@ const server = createServer(async (req, res) => {
       }
       const prompt = body.prompt || `Execute task: ${body.agentName}`
       await updateTaskStatus(TASKS_DIR, teamId, taskId, 'in_progress')
-      const execInfo = executor.startExecution(teamId, taskId, body.agentName, prompt)
+      const execInfo = await executor.startExecution(teamId, taskId, body.agentName, prompt)
       broadcast()
       return json(res, 200, execInfo)
     }
@@ -281,6 +320,29 @@ const server = createServer(async (req, res) => {
     // GET /api/executions — list active executions
     if (path === '/api/executions' && req.method === 'GET') {
       return json(res, 200, { executions: executor.getActiveExecutions() })
+    }
+
+    // ─── Session routes ───────────────────────────────────────
+
+    // GET /api/sessions — list all sessions
+    if (path === '/api/sessions' && req.method === 'GET') {
+      return json(res, 200, {
+        sessions: registry.getAllSessions(),
+        stats: pool.getStats(),
+      })
+    }
+
+    // POST /api/sessions/warmup — manually spawn a warm session
+    if (path === '/api/sessions/warmup' && req.method === 'POST') {
+      const session = await pool.spawnNew()
+      return json(res, 201, session)
+    }
+
+    // DELETE /api/sessions/:sessionId — stop a specific session
+    if (segments[0] === 'api' && segments[1] === 'sessions' && segments.length === 3 && req.method === 'DELETE') {
+      const sessionId = segments[2]
+      await pool.stopSession(sessionId)
+      return json(res, 200, { ok: true })
     }
 
     json(res, 404, { error: 'Not found' })
@@ -328,6 +390,10 @@ async function main(): Promise<void> {
     broadcast()
   })
 
+  // Start session pool (pre-warm sessions)
+  await pool.start()
+  process.stdout.write(`   Session pool started (min: 1, max: 5)\n`)
+
   // Also broadcast on interval for smooth updates
   setInterval(broadcast, BROADCAST_INTERVAL)
 
@@ -345,11 +411,11 @@ main().catch((err) => {
 })
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  executor.shutdown()
+process.on('SIGTERM', async () => {
+  await executor.shutdown()
   process.exit(0)
 })
-process.on('SIGINT', () => {
-  executor.shutdown()
+process.on('SIGINT', async () => {
+  await executor.shutdown()
   process.exit(0)
 })

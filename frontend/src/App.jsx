@@ -12,7 +12,7 @@ import { AgentOutputPanel } from './components/ui/AgentOutputPanel.jsx'
 import { setGlobalRoomOverride } from './components/office/Agent.js'
 
 export function App() {
-  const { data, connected, executions, outputHistory, clearOutput } = useWebSocket()
+  const { data, connected, executions, outputHistory, clearOutput, sessions } = useWebSocket()
   const [hoveredAgent, setHoveredAgent] = useState(null)
   const [selectedAgent, setSelectedAgent] = useState(null)
   const [currentRoom, setCurrentRoom] = useState(null)
@@ -96,6 +96,7 @@ export function App() {
         executions={executions}
         outputHistory={outputHistory}
         onViewOutput={handleViewOutput}
+        sessions={sessions}
       />
       {viewingOutput && (
         <AgentOutputPanel

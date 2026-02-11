@@ -1,18 +1,10 @@
-// executor.ts — Spawn and manage claude CLI processes
-// Streams output back via callbacks, enforces concurrency limits and timeouts
+// executor.ts — Thin facade over the dispatcher
+// Maintains the same external API so index.ts requires minimal changes
+// Delegates all execution logic to the dispatcher + session pool
 
-import { spawn, type ChildProcess } from 'node:child_process'
-import type { ExecutionInfo, ExecutionStatus } from './types.js'
-
-const MAX_CONCURRENT = 5
-const EXECUTION_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
-const KILL_GRACE_MS = 5000
-
-interface ExecutionEntry {
-  readonly info: ExecutionInfo
-  readonly process: ChildProcess
-  readonly timeoutId: ReturnType<typeof setTimeout>
-}
+import type { Dispatcher } from './dispatcher.js'
+import type { SessionRegistry } from './session-registry.js'
+import type { ExecutionInfo } from './types.js'
 
 type OutputCallback = (
   teamId: string,
@@ -34,178 +26,61 @@ type StartCallback = (
   agentName: string
 ) => void
 
-export function createExecutor() {
-  const executions = new Map<string, ExecutionEntry>()
+export function createExecutor(
+  dispatcher: Dispatcher,
+  registry: SessionRegistry
+) {
   let onOutput: OutputCallback | null = null
   let onEnd: EndCallback | null = null
   let onStart: StartCallback | null = null
 
-  function executionKey(teamId: string, taskId: string): string {
-    return `${teamId}:${taskId}`
-  }
-
   function getActiveCount(): number {
-    return executions.size
+    return dispatcher.getActiveExecutions().length
   }
 
   function getActiveExecutions(): readonly ExecutionInfo[] {
-    return Array.from(executions.values()).map((e) => e.info)
+    return dispatcher.getActiveExecutions()
   }
 
   function isRunning(teamId: string, taskId: string): boolean {
-    return executions.has(executionKey(teamId, taskId))
+    return dispatcher.isDispatched(teamId, taskId)
   }
 
-  function startExecution(
+  async function startExecution(
     teamId: string,
     taskId: string,
     agentName: string,
     prompt: string
-  ): ExecutionInfo {
-    const key = executionKey(teamId, taskId)
-
-    if (executions.has(key)) {
-      throw new Error(`Task ${taskId} is already executing`)
-    }
-
-    if (getActiveCount() >= MAX_CONCURRENT) {
-      throw new Error(`Max concurrent executions (${MAX_CONCURRENT}) reached`)
-    }
-
+  ): Promise<ExecutionInfo> {
     if (!prompt || prompt.trim().length === 0) {
       throw new Error('Prompt is required')
     }
 
-    const info: ExecutionInfo = {
+    const result = await dispatcher.dispatch({
+      teamId,
+      taskId,
+      agentName,
+      prompt: prompt.trim(),
+    })
+
+    if (!result.dispatched) {
+      throw new Error(result.reason ?? 'Dispatch failed')
+    }
+
+    const session = registry.getSession(result.sessionId)
+
+    return {
       taskId,
       teamId,
       agentName,
       status: 'running',
       startedAt: Date.now(),
-      pid: undefined,
+      pid: session?.pid,
     }
-
-    const proc = spawn('claude', [
-      '--print',
-      '--verbose',
-      '--output-format', 'stream-json',
-      '--dangerously-skip-permissions',
-      prompt.trim(),
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-      },
-    })
-
-    const infoWithPid: ExecutionInfo = {
-      ...info,
-      pid: proc.pid,
-    }
-
-    // Notify start
-    onStart?.(teamId, taskId, agentName)
-
-    // Stream stdout line by line
-    let stdoutBuffer = ''
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString()
-      const lines = stdoutBuffer.split('\n')
-      // Keep last incomplete line in buffer
-      stdoutBuffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (line.trim().length > 0) {
-          onOutput?.(teamId, taskId, line, 'stdout')
-        }
-      }
-    })
-
-    // Stream stderr
-    let stderrBuffer = ''
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderrBuffer += chunk.toString()
-      const lines = stderrBuffer.split('\n')
-      stderrBuffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (line.trim().length > 0) {
-          onOutput?.(teamId, taskId, line, 'stderr')
-        }
-      }
-    })
-
-    // Handle exit
-    proc.on('close', (code, signal) => {
-      // Flush remaining buffers
-      if (stdoutBuffer.trim().length > 0) {
-        onOutput?.(teamId, taskId, stdoutBuffer, 'stdout')
-      }
-      if (stderrBuffer.trim().length > 0) {
-        onOutput?.(teamId, taskId, stderrBuffer, 'stderr')
-      }
-
-      const entry = executions.get(key)
-      if (entry) {
-        clearTimeout(entry.timeoutId)
-        executions.delete(key)
-      }
-
-      onEnd?.(teamId, taskId, code, signal)
-    })
-
-    proc.on('error', (err) => {
-      const entry = executions.get(key)
-      if (entry) {
-        clearTimeout(entry.timeoutId)
-        executions.delete(key)
-      }
-
-      onOutput?.(teamId, taskId, `Process error: ${err.message}`, 'stderr')
-      onEnd?.(teamId, taskId, 1, null)
-    })
-
-    // Timeout
-    const timeoutId = setTimeout(() => {
-      if (executions.has(key)) {
-        onOutput?.(teamId, taskId, 'Execution timed out after 10 minutes', 'stderr')
-        cancelExecution(teamId, taskId)
-      }
-    }, EXECUTION_TIMEOUT_MS)
-
-    executions.set(key, {
-      info: infoWithPid,
-      process: proc,
-      timeoutId,
-    })
-
-    return infoWithPid
   }
 
   function cancelExecution(teamId: string, taskId: string): boolean {
-    const key = executionKey(teamId, taskId)
-    const entry = executions.get(key)
-
-    if (!entry) {
-      return false
-    }
-
-    const proc = entry.process
-
-    // Try SIGTERM first
-    proc.kill('SIGTERM')
-
-    // Force kill after grace period
-    setTimeout(() => {
-      try {
-        proc.kill('SIGKILL')
-      } catch {
-        // Process may have already exited
-      }
-    }, KILL_GRACE_MS)
-
-    return true
+    return dispatcher.cancel(teamId, taskId)
   }
 
   function setOnOutput(cb: OutputCallback): void {
@@ -220,16 +95,21 @@ export function createExecutor() {
     onStart = cb
   }
 
-  function shutdown(): void {
-    for (const [key, entry] of executions) {
-      clearTimeout(entry.timeoutId)
-      try {
-        entry.process.kill('SIGTERM')
-      } catch {
-        // Best effort
-      }
-    }
-    executions.clear()
+  async function shutdown(): Promise<void> {
+    await dispatcher.shutdown()
+  }
+
+  // These getters are used by the dispatcher wiring in index.ts
+  function getOnOutput(): OutputCallback | null {
+    return onOutput
+  }
+
+  function getOnEnd(): EndCallback | null {
+    return onEnd
+  }
+
+  function getOnStart(): StartCallback | null {
+    return onStart
   }
 
   return {
@@ -241,6 +121,9 @@ export function createExecutor() {
     setOnOutput,
     setOnEnd,
     setOnStart,
+    getOnOutput,
+    getOnEnd,
+    getOnStart,
     shutdown,
   }
 }
