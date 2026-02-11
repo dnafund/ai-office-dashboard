@@ -1,0 +1,83 @@
+#!/bin/bash
+# One-time setup for new machine
+# Usage: bash scripts/setup_hooks.sh
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+HOOKS_DIR="${REPO_DIR}/.git/hooks"
+BRAIN_DB="${REPO_DIR}/brain-export.db"
+BRAIN_NAME="ai-office-dashboard"
+NMEM_DIR="$HOME/.neuralmemory/brains"
+
+echo "=== ai-office-dashboard Setup ==="
+
+# 1. Detect platform + nmem path
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    NMEM="$(where nmem 2>/dev/null || echo "")"
+    PLATFORM="windows"
+else
+    NMEM="$(which nmem 2>/dev/null || echo "")"
+    PLATFORM="unix"
+fi
+
+if [ -z "$NMEM" ]; then
+    echo "nmem not found, trying python module..."
+    NMEM_CMD='python3 -c "from neural_memory.cli import app; app()" --'
+else
+    NMEM_CMD="$NMEM"
+fi
+
+echo "Platform: $PLATFORM"
+echo "nmem: ${NMEM_CMD:-not found}"
+
+# 2. Import brain DB
+echo ""
+echo "--- Brain Import ---"
+
+mkdir -p "$NMEM_DIR"
+if [ -f "$BRAIN_DB" ]; then
+    cp "$BRAIN_DB" "${NMEM_DIR}/${BRAIN_NAME}.db"
+    echo "Imported brain-export.db -> ~/.neuralmemory/brains/${BRAIN_NAME}.db"
+else
+    echo "WARNING: brain-export.db not found"
+fi
+
+# 3. Install post-commit hook
+echo ""
+echo "--- Git Hooks ---"
+cat > "${HOOKS_DIR}/post-commit" << 'HOOK'
+#!/bin/bash
+# Neural Memory auto-capture
+if [ -f "scripts/nmem_commit_store.sh" ]; then
+    bash scripts/nmem_commit_store.sh
+fi
+HOOK
+chmod +x "${HOOKS_DIR}/post-commit"
+echo "Installed post-commit hook"
+
+# 4. Install pre-push hook
+cat > "${HOOKS_DIR}/pre-push" << 'HOOK'
+#!/bin/bash
+# Pre-push: sync neural memory brain DB
+
+echo "Syncing neural memory before push..."
+if [ -f "scripts/nmem_maintenance.sh" ]; then
+    bash scripts/nmem_maintenance.sh
+
+    # Auto-commit brain-export.db if changed
+    if ! git diff --quiet brain-export.db 2>/dev/null; then
+        echo "Brain DB changed, committing..."
+        git add brain-export.db
+        git commit -m "chore: sync brain-export.db" --no-verify
+    fi
+fi
+HOOK
+chmod +x "${HOOKS_DIR}/pre-push"
+echo "Installed pre-push hook"
+
+# 5. Verify
+echo ""
+echo "--- Verify ---"
+if [ -f "${NMEM_DIR}/${BRAIN_NAME}.db" ]; then
+    echo "Brain DB: $(ls -lh "${NMEM_DIR}/${BRAIN_NAME}.db" | awk '{print $5}')"
+fi
+echo "=== Setup Complete ==="
