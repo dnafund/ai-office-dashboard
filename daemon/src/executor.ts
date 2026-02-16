@@ -3,7 +3,7 @@
 // Delegates all execution logic to the dispatcher + session pool
 
 import type { Dispatcher } from './dispatcher.js'
-import type { SessionRegistry } from './session-registry.js'
+import type { PoolManager } from './pool-manager.js'
 import type { ExecutionInfo } from './types.js'
 
 type OutputCallback = (
@@ -28,7 +28,7 @@ type StartCallback = (
 
 export function createExecutor(
   dispatcher: Dispatcher,
-  registry: SessionRegistry
+  poolManager: PoolManager
 ) {
   let onOutput: OutputCallback | null = null
   let onEnd: EndCallback | null = null
@@ -50,10 +50,15 @@ export function createExecutor(
     teamId: string,
     taskId: string,
     agentName: string,
-    prompt: string
+    prompt: string,
+    projectId: string
   ): Promise<ExecutionInfo> {
     if (!prompt || prompt.trim().length === 0) {
       throw new Error('Prompt is required')
+    }
+
+    if (!projectId) {
+      throw new Error('projectId is required')
     }
 
     const result = await dispatcher.dispatch({
@@ -61,13 +66,16 @@ export function createExecutor(
       taskId,
       agentName,
       prompt: prompt.trim(),
+      projectId,
     })
 
     if (!result.dispatched) {
       throw new Error(result.reason ?? 'Dispatch failed')
     }
 
-    const session = registry.getSession(result.sessionId)
+    // Find session in the project's pool registry
+    const poolEntry = poolManager.getPool(projectId)
+    const session = poolEntry?.registry.getSession(result.sessionId)
 
     return {
       taskId,

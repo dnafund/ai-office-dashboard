@@ -63,10 +63,10 @@ export function createTaskApi(teamId, subject, description, owner) {
   })
 }
 
-export function executeTask(teamId, taskId, agentName, prompt) {
+export function executeTask(teamId, taskId, agentName, prompt, projectId) {
   return request(`/tasks/${teamId}/${taskId}/execute`, {
     method: 'POST',
-    body: JSON.stringify({ agentName, prompt }),
+    body: JSON.stringify({ agentName, prompt, projectId }),
   })
 }
 
@@ -86,5 +86,24 @@ export function updateTaskStatus(teamId, taskId, status) {
   return request(`/tasks/${teamId}/${taskId}/status`, {
     method: 'PUT',
     body: JSON.stringify({ status }),
+  })
+}
+
+// ─── Project API ────────────────────────────────────────────
+
+export function listProjects() {
+  return request('/projects', { method: 'GET' })
+}
+
+export function registerProject(name, path, color) {
+  return request('/projects', {
+    method: 'POST',
+    body: JSON.stringify({ name, path, color }),
+  })
+}
+
+export function unregisterProject(projectId) {
+  return request(`/projects/${projectId}`, {
+    method: 'DELETE',
   })
 }

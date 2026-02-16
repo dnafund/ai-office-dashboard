@@ -76,27 +76,50 @@ function CreateTaskForm({ teamId, onCreated }) {
   )
 }
 
-function ExecuteDialog({ task, teamId, members, onClose }) {
+function ExecuteDialog({ task, teamId, members, projects = [], onClose }) {
   const [prompt, setPrompt] = useState(
     `You are agent "${task.owner || 'default'}". Execute this task:\n\nSubject: ${task.subject}\nDescription: ${task.description || 'N/A'}\n\nWork in the project directory. Report progress clearly.`
   )
   const [executing, setExecuting] = useState(false)
+  const [selectedProjectId, setSelectedProjectId] = useState(projects[0]?.id ?? '')
 
   const handleExecute = useCallback(async () => {
+    if (!selectedProjectId) return
     const agentName = task.owner || 'default'
     setExecuting(true)
     try {
-      await executeTask(teamId, task.id, agentName, prompt)
+      await executeTask(teamId, task.id, agentName, prompt, selectedProjectId)
       onClose?.()
     } catch {
       // Execution request failed
     } finally {
       setExecuting(false)
     }
-  }, [teamId, task.id, task.owner, prompt, onClose])
+  }, [teamId, task.id, task.owner, prompt, selectedProjectId, onClose])
 
   return (
     <div className="mt-2 p-2 rounded bg-white/5 border border-white/10 space-y-2">
+      {/* Project selector */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-text-dim font-mono">Project:</span>
+        <select
+          value={selectedProjectId}
+          onChange={(e) => setSelectedProjectId(e.target.value)}
+          className="text-[10px] px-2 py-1 rounded bg-white/5 border border-white/10 text-white font-mono focus:outline-none focus:border-white/30"
+        >
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        {selectedProjectId && projects.find((p) => p.id === selectedProjectId) && (
+          <span
+            className="w-2 h-2 rounded-full flex-shrink-0"
+            style={{ backgroundColor: projects.find((p) => p.id === selectedProjectId)?.color }}
+          />
+        )}
+      </div>
       <textarea
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
@@ -106,7 +129,7 @@ function ExecuteDialog({ task, teamId, members, onClose }) {
       <div className="flex gap-1.5">
         <button
           onClick={handleExecute}
-          disabled={executing || !prompt.trim()}
+          disabled={executing || !prompt.trim() || !selectedProjectId}
           className="text-[10px] px-2 py-1 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 font-mono transition-colors disabled:opacity-40"
         >
           {executing ? 'Starting...' : 'Run'}
@@ -122,7 +145,7 @@ function ExecuteDialog({ task, teamId, members, onClose }) {
   )
 }
 
-function TaskRow({ task, teamId, members, isExecuting, lastOutput, onViewOutput }) {
+function TaskRow({ task, teamId, members, projects, isExecuting, lastOutput, onViewOutput }) {
   const [assigning, setAssigning] = useState(false)
   const [showDropdown, setShowDropdown] = useState(false)
   const [showExecute, setShowExecute] = useState(false)
@@ -273,6 +296,7 @@ function TaskRow({ task, teamId, members, isExecuting, lastOutput, onViewOutput 
           task={task}
           teamId={teamId}
           members={members}
+          projects={projects}
           onClose={() => setShowExecute(false)}
         />
       )}
@@ -310,7 +334,7 @@ function SessionPoolIndicator({ sessions = [] }) {
   )
 }
 
-export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, onViewOutput, sessions = [] }) {
+export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, onViewOutput, sessions = [], projects = [] }) {
   const [expanded, setExpanded] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [createTeamId, setCreateTeamId] = useState(null)
@@ -392,6 +416,7 @@ export function TaskPanel({ tasks = [], teams = [], executions, outputHistory, o
                         task={task}
                         teamId={taskState.teamId}
                         members={members}
+                        projects={projects}
                         isExecuting={isExec}
                         lastOutput={lastLine}
                         onViewOutput={onViewOutput}

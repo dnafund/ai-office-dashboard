@@ -2,9 +2,8 @@
 // Routes tasks to idle sessions or spawns new ones
 // Maps session output back to task channels for WebSocket broadcast
 
-import { taskKeyOf, parseTaskKey } from './session-registry.js'
-import type { SessionRegistry } from './session-registry.js'
-import type { SessionPool } from './session-pool.js'
+import { taskKeyOf } from './session-registry.js'
+import type { PoolManager } from './pool-manager.js'
 import type { DispatchRequest, DispatchResult, ExecutionInfo } from './types.js'
 
 const TASK_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
@@ -30,8 +29,7 @@ type EndCallback = (
 ) => void
 
 interface DispatcherConfig {
-  readonly pool: SessionPool
-  readonly registry: SessionRegistry
+  readonly poolManager: PoolManager
   readonly onOutput: OutputCallback
   readonly onStart: StartCallback
   readonly onEnd: EndCallback
@@ -42,67 +40,57 @@ interface TaskMeta {
   readonly taskId: string
   readonly agentName: string
   readonly sessionId: string
+  readonly projectId: string
   readonly timeoutId: ReturnType<typeof setTimeout>
   readonly startedAt: number
 }
 
 export function createDispatcher(config: DispatcherConfig) {
-  const { pool, registry, onOutput, onStart, onEnd } = config
+  const { poolManager, onOutput, onStart, onEnd } = config
   const activeTasks = new Map<string, TaskMeta>()
 
   // Called by session-pool when a session emits output
+  // Uses activeTasks map to route output to the correct task
   function handleSessionOutput(
     sessionId: string,
     data: string,
     stream: 'stdout' | 'stderr'
   ): void {
-    const session = registry.getSession(sessionId)
-    if (!session?.currentTaskKey) return
-
-    const parsed = parseTaskKey(session.currentTaskKey)
-    if (!parsed) return
-
-    onOutput(parsed.teamId, parsed.taskId, data, stream)
+    for (const [, meta] of activeTasks) {
+      if (meta.sessionId === sessionId) {
+        onOutput(meta.teamId, meta.taskId, data, stream)
+        return
+      }
+    }
   }
 
   // Called by session-pool when a task completes (result event)
   function handleTaskComplete(sessionId: string): void {
-    const session = registry.getSession(sessionId)
-    if (!session?.currentTaskKey) return
-
-    const parsed = parseTaskKey(session.currentTaskKey)
-    if (!parsed) return
-
-    const taskKey = session.currentTaskKey
-    const meta = activeTasks.get(taskKey)
-    if (meta) {
-      clearTimeout(meta.timeoutId)
-      activeTasks.delete(taskKey)
-    }
-
-    onEnd(parsed.teamId, parsed.taskId, 0, null)
-  }
-
-  // Called when a session dies unexpectedly
-  function handleSessionDeath(sessionId: string): void {
-    // Find any task assigned to this session
     for (const [taskKey, meta] of activeTasks) {
       if (meta.sessionId === sessionId) {
         clearTimeout(meta.timeoutId)
         activeTasks.delete(taskKey)
+        onEnd(meta.teamId, meta.taskId, 0, null)
+        return
+      }
+    }
+  }
 
-        const parsed = parseTaskKey(taskKey)
-        if (parsed) {
-          onOutput(parsed.teamId, parsed.taskId, 'Session died unexpectedly', 'stderr')
-          onEnd(parsed.teamId, parsed.taskId, 1, null)
-        }
+  // Called when a session dies unexpectedly
+  function handleSessionDeath(sessionId: string): void {
+    for (const [taskKey, meta] of activeTasks) {
+      if (meta.sessionId === sessionId) {
+        clearTimeout(meta.timeoutId)
+        activeTasks.delete(taskKey)
+        onOutput(meta.teamId, meta.taskId, 'Session died unexpectedly', 'stderr')
+        onEnd(meta.teamId, meta.taskId, 1, null)
         break
       }
     }
   }
 
   async function dispatch(request: DispatchRequest): Promise<DispatchResult> {
-    const { teamId, taskId, agentName, prompt } = request
+    const { teamId, taskId, agentName, prompt, projectId } = request
     const taskKey = taskKeyOf(teamId, taskId)
 
     // 1. Check if task already dispatched
@@ -115,8 +103,30 @@ export function createDispatcher(config: DispatcherConfig) {
       }
     }
 
-    // 2. Get or spawn a session
-    let session = request.preferNewSession
+    // 2. Resolve project pool
+    if (!projectId) {
+      return {
+        sessionId: '',
+        taskKey,
+        dispatched: false,
+        reason: 'No projectId specified',
+      }
+    }
+
+    const poolEntry = await poolManager.getOrCreatePool(projectId)
+    if (!poolEntry) {
+      return {
+        sessionId: '',
+        taskKey,
+        dispatched: false,
+        reason: `Project not found: ${projectId}`,
+      }
+    }
+
+    const { pool, registry } = poolEntry
+
+    // 3. Get or spawn a session from the project's pool
+    const session = request.preferNewSession
       ? await pool.spawnNew()
       : await pool.getOrSpawn()
 
@@ -126,20 +136,6 @@ export function createDispatcher(config: DispatcherConfig) {
         taskKey,
         dispatched: false,
         reason: 'No sessions available (pool exhausted)',
-      }
-    }
-
-    // 3. Wait for session to be ready if it's still starting
-    if (session.state === 'starting') {
-      await waitForSessionReady(session.sessionId, 30_000)
-      session = registry.getSession(session.sessionId)
-      if (!session || session.state === 'dead') {
-        return {
-          sessionId: '',
-          taskKey,
-          dispatched: false,
-          reason: 'Session failed to start',
-        }
       }
     }
 
@@ -165,6 +161,7 @@ export function createDispatcher(config: DispatcherConfig) {
       taskId,
       agentName,
       sessionId: session.sessionId,
+      projectId,
       timeoutId,
       startedAt: Date.now(),
     })
@@ -202,9 +199,13 @@ export function createDispatcher(config: DispatcherConfig) {
     clearTimeout(meta.timeoutId)
     activeTasks.delete(taskKey)
 
-    pool.cancelSession(meta.sessionId)
-    onEnd(teamId, taskId, null, 'SIGTERM')
+    // Cancel session in the project's pool
+    const entry = poolManager.getPool(meta.projectId)
+    if (entry) {
+      entry.pool.cancelSession(meta.sessionId)
+    }
 
+    onEnd(teamId, taskId, null, 'SIGTERM')
     return true
   }
 
@@ -218,14 +219,18 @@ export function createDispatcher(config: DispatcherConfig) {
   }
 
   function getActiveExecutions(): readonly ExecutionInfo[] {
-    return Array.from(activeTasks.values()).map((meta) => ({
-      taskId: meta.taskId,
-      teamId: meta.teamId,
-      agentName: meta.agentName,
-      status: 'running' as const,
-      startedAt: meta.startedAt,
-      pid: registry.getSession(meta.sessionId)?.pid,
-    }))
+    return Array.from(activeTasks.values()).map((meta) => {
+      const entry = poolManager.getPool(meta.projectId)
+      const session = entry?.registry.getSession(meta.sessionId)
+      return {
+        taskId: meta.taskId,
+        teamId: meta.teamId,
+        agentName: meta.agentName,
+        status: 'running' as const,
+        startedAt: meta.startedAt,
+        pid: session?.pid,
+      }
+    })
   }
 
   async function shutdown(): Promise<void> {
@@ -235,24 +240,7 @@ export function createDispatcher(config: DispatcherConfig) {
     }
     activeTasks.clear()
 
-    await pool.shutdown()
-  }
-
-  function waitForSessionReady(sessionId: string, timeoutMs: number): Promise<void> {
-    return new Promise((resolve) => {
-      const start = Date.now()
-
-      const check = () => {
-        const session = registry.getSession(sessionId)
-        if (!session || session.state !== 'starting' || Date.now() - start > timeoutMs) {
-          resolve()
-          return
-        }
-        setTimeout(check, 500)
-      }
-
-      check()
-    })
+    await poolManager.shutdown()
   }
 
   return {

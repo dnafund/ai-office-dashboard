@@ -7,8 +7,8 @@ import { readAllActivity } from './inbox.js'
 import { readAllTasks, assignTask } from './tasks.js'
 import { createTeam, deleteTeam, addAgent, removeAgent, updateAgent } from './manager.js'
 import { createTask, updateTaskStatus, deleteTask } from './task-manager.js'
-import { createSessionRegistry } from './session-registry.js'
-import { createSessionPool } from './session-pool.js'
+import { createProjectRegistry } from './project-registry.js'
+import { createPoolManager } from './pool-manager.js'
 import { createDispatcher } from './dispatcher.js'
 import { createExecutor } from './executor.js'
 import type { ActivityMessage, DashboardState, TaskState, WsMessage, WsBroadcastMessage } from './types.js'
@@ -24,9 +24,9 @@ const clients = new Set<WebSocket>()
 let cachedActivity: readonly ActivityMessage[] = []
 let cachedTasks: readonly TaskState[] = []
 
-// ─── Session Pool + Dispatcher setup ────────────────────────
+// ─── Project Registry + Pool Manager setup ───────────────────
 
-const registry = createSessionRegistry()
+const projectRegistry = createProjectRegistry()
 
 function broadcastMessage(msg: WsBroadcastMessage): void {
   const payload = JSON.stringify(msg)
@@ -40,12 +40,14 @@ function broadcastMessage(msg: WsBroadcastMessage): void {
 function broadcastSessionState(): void {
   broadcastMessage({
     type: 'session_state',
-    sessions: registry.getAllSessions(),
+    sessions: poolManager.getAllSessions(),
   })
 }
 
-const pool = createSessionPool({
-  registry,
+const poolManager = createPoolManager({
+  projectRegistry,
+  minPoolSize: 1,
+  maxPoolSize: 3,
   onOutput: (sessionId, data, stream) => {
     dispatcher.handleSessionOutput(sessionId, data, stream)
   },
@@ -55,18 +57,10 @@ const pool = createSessionPool({
   onSessionChange: () => {
     broadcastSessionState()
   },
-  config: {
-    minPoolSize: 1,
-    maxPoolSize: 5,
-    idleTimeoutMs: 15 * 60 * 1000,
-    healthCheckIntervalMs: 30 * 1000,
-    projectDir: PROJECT_DIR,
-  },
 })
 
 const dispatcher = createDispatcher({
-  pool,
-  registry,
+  poolManager,
   onOutput: (teamId, taskId, data, stream) => {
     broadcastMessage({
       type: 'execution_output',
@@ -104,7 +98,7 @@ const dispatcher = createDispatcher({
   },
 })
 
-const executor = createExecutor(dispatcher, registry)
+const executor = createExecutor(dispatcher, poolManager)
 
 // ─── State builder ──────────────────────────────────────────
 
@@ -118,7 +112,8 @@ async function buildState(): Promise<DashboardState> {
     teams,
     activity: cachedActivity,
     tasks: cachedTasks,
-    sessions: registry.getAllSessions(),
+    sessions: poolManager.getAllSessions(),
+    projects: projectRegistry.getAll(),
     timestamp: Date.now(),
   }
 }
@@ -177,6 +172,41 @@ const server = createServer(async (req, res) => {
   const { path, segments } = parseUrl(req.url ?? '/')
 
   try {
+    // ─── Project routes ────────────────────────────────────
+
+    // GET /api/projects — list all projects
+    if (path === '/api/projects' && req.method === 'GET') {
+      return json(res, 200, { projects: projectRegistry.getAll() })
+    }
+
+    // POST /api/projects — register { name, path }
+    if (path === '/api/projects' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req))
+      if (!body.name || typeof body.name !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid name' })
+      }
+      if (!body.path || typeof body.path !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid path' })
+      }
+      const project = await projectRegistry.register(body.name, body.path, body.color)
+      broadcast()
+      return json(res, 201, project)
+    }
+
+    // DELETE /api/projects/:id — unregister + stop pool
+    if (segments[0] === 'api' && segments[1] === 'projects' && segments.length === 3 && req.method === 'DELETE') {
+      const projectId = segments[2]
+      await poolManager.stopPool(projectId)
+      const removed = await projectRegistry.unregister(projectId)
+      if (!removed) {
+        return json(res, 404, { error: 'Project not found' })
+      }
+      broadcast()
+      return json(res, 200, { ok: true })
+    }
+
+    // ─── Team routes ───────────────────────────────────────
+
     // GET /api/teams — list all teams + activity
     if (path === '/api/teams' && req.method === 'GET') {
       const state = await buildState()
@@ -232,6 +262,8 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true })
     }
 
+    // ─── Task routes ───────────────────────────────────────
+
     // GET /api/tasks — list all tasks
     if (path === '/api/tasks' && req.method === 'GET') {
       const teams = watcher.getTeams()
@@ -277,7 +309,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, updated)
     }
 
-    // POST /api/tasks/:teamId/:taskId/execute — execute task { agentName, prompt? }
+    // POST /api/tasks/:teamId/:taskId/execute — execute task { agentName, prompt?, projectId }
     if (segments[0] === 'api' && segments[1] === 'tasks' && segments[4] === 'execute' && segments.length === 5 && req.method === 'POST') {
       const teamId = segments[2]
       const taskId = segments[3]
@@ -285,9 +317,12 @@ const server = createServer(async (req, res) => {
       if (!body.agentName || typeof body.agentName !== 'string') {
         return json(res, 400, { error: 'Missing or invalid agentName' })
       }
+      if (!body.projectId || typeof body.projectId !== 'string') {
+        return json(res, 400, { error: 'Missing or invalid projectId' })
+      }
       const prompt = body.prompt || `Execute task: ${body.agentName}`
       await updateTaskStatus(TASKS_DIR, teamId, taskId, 'in_progress')
-      const execInfo = await executor.startExecution(teamId, taskId, body.agentName, prompt)
+      const execInfo = await executor.startExecution(teamId, taskId, body.agentName, prompt, body.projectId)
       broadcast()
       return json(res, 200, execInfo)
     }
@@ -324,25 +359,12 @@ const server = createServer(async (req, res) => {
 
     // ─── Session routes ───────────────────────────────────────
 
-    // GET /api/sessions — list all sessions
+    // GET /api/sessions — list all sessions across all projects
     if (path === '/api/sessions' && req.method === 'GET') {
       return json(res, 200, {
-        sessions: registry.getAllSessions(),
-        stats: pool.getStats(),
+        sessions: poolManager.getAllSessions(),
+        stats: poolManager.getAllStats(),
       })
-    }
-
-    // POST /api/sessions/warmup — manually spawn a warm session
-    if (path === '/api/sessions/warmup' && req.method === 'POST') {
-      const session = await pool.spawnNew()
-      return json(res, 201, session)
-    }
-
-    // DELETE /api/sessions/:sessionId — stop a specific session
-    if (segments[0] === 'api' && segments[1] === 'sessions' && segments.length === 3 && req.method === 'DELETE') {
-      const sessionId = segments[2]
-      await pool.stopSession(sessionId)
-      return json(res, 200, { ok: true })
     }
 
     json(res, 404, { error: 'Not found' })
@@ -385,14 +407,18 @@ wss.on('connection', (ws) => {
 
 // Start
 async function main(): Promise<void> {
+  // Load project registry and ensure cwd is registered
+  await projectRegistry.load()
+  const defaultProject = await projectRegistry.ensureDefault(PROJECT_DIR)
+  process.stdout.write(`   Default project: ${defaultProject.name} (${defaultProject.path})\n`)
+
   await watcher.start(() => {
-    // File change detected — broadcast immediately
     broadcast()
   })
 
-  // Start session pool (pre-warm sessions)
-  await pool.start()
-  process.stdout.write(`   Session pool started (min: 1, max: 5)\n`)
+  // Pre-warm a pool for the default project
+  await poolManager.getOrCreatePool(defaultProject.id)
+  process.stdout.write(`   Pool started for default project\n`)
 
   // Also broadcast on interval for smooth updates
   setInterval(broadcast, BROADCAST_INTERVAL)
@@ -400,6 +426,7 @@ async function main(): Promise<void> {
   server.listen(PORT, () => {
     process.stdout.write(`\n🏢 AI Office Daemon running on :${PORT}\n`)
     process.stdout.write(`   Teams dir: ${TEAMS_DIR}\n`)
+    process.stdout.write(`   Projects: ${projectRegistry.getAll().length} registered\n`)
     process.stdout.write(`   REST: http://localhost:${PORT}/api/teams\n`)
     process.stdout.write(`   WS:   ws://localhost:${PORT}\n\n`)
   })

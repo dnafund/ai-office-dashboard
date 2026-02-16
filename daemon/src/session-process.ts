@@ -1,7 +1,6 @@
-// session-process.ts — Manages a single long-running Claude CLI process
-// Uses --input-format stream-json for bidirectional communication
-// Stdin stays open: write JSON messages to trigger new tasks
-// Stdout emits stream-json events: parse assistant/result messages
+// session-process.ts — Spawn claude --print per task, reuse session via --resume
+// Each execution is a separate process but shares session context
+// Streams output via stream-json format, detects result for completion
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -14,8 +13,6 @@ export type ProcessOutputCallback = (
   stream: 'stdout' | 'stderr'
 ) => void
 
-export type ProcessReadyCallback = (sessionId: string) => void
-
 export type ProcessResultCallback = (
   sessionId: string,
   resultText: string
@@ -27,22 +24,24 @@ export type ProcessExitCallback = (
   signal: string | null
 ) => void
 
-interface SessionProcessConfig {
+interface RunTaskConfig {
   readonly sessionId: string
   readonly projectDir: string
+  readonly prompt: string
   readonly onOutput: ProcessOutputCallback
-  readonly onReady: ProcessReadyCallback
   readonly onResult: ProcessResultCallback
   readonly onExit: ProcessExitCallback
 }
 
 export interface SessionProcess {
   readonly sessionId: string
+  readonly claudeSessionId: string
   readonly pid: number | undefined
-  sendMessage(prompt: string): boolean
+  runTask(prompt: string): boolean
   stop(): Promise<void>
   kill(): void
   isAlive(): boolean
+  isBusy(): boolean
 }
 
 function parseStreamJsonLine(line: string): {
@@ -76,7 +75,7 @@ function parseStreamJsonLine(line: string): {
       return null
     }
 
-    // System init/ready message
+    // System init message
     if (parsed.type === 'system' && parsed.subtype === 'init') {
       return { type: 'init' }
     }
@@ -87,37 +86,29 @@ function parseStreamJsonLine(line: string): {
   }
 }
 
-export function createSessionProcess(config: SessionProcessConfig): SessionProcess {
-  const { sessionId, projectDir, onOutput, onReady, onResult, onExit } = config
+// Run a single task as a --print process, streaming output
+function runTaskProcess(config: RunTaskConfig): ChildProcess {
+  const { sessionId, projectDir, prompt, onOutput, onResult, onExit } = config
 
-  let proc: ChildProcess | null = null
-  let alive = false
-  let ready = false
-  let stdoutBuffer = ''
-  let stderrBuffer = ''
-
-  // Generate a unique Claude session ID for this process
-  const claudeSessionId = randomUUID()
-
-  proc = spawn('claude', [
+  const proc = spawn('claude', [
     '--print',
-    '--input-format', 'stream-json',
-    '--output-format', 'stream-json',
-    '--session-id', claudeSessionId,
-    '--dangerously-skip-permissions',
     '--verbose',
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    prompt,
   ], {
     cwd: projectDir,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
     },
   })
 
-  alive = true
+  let stdoutBuffer = ''
+  let stderrBuffer = ''
+  let gotResult = false
 
-  // Parse stdout line by line (stream-json format)
   proc.stdout?.on('data', (chunk: Buffer) => {
     stdoutBuffer += chunk.toString()
     const lines = stdoutBuffer.split('\n')
@@ -128,13 +119,8 @@ export function createSessionProcess(config: SessionProcessConfig): SessionProce
 
       const parsed = parseStreamJsonLine(line)
 
-      if (parsed?.type === 'init' && !ready) {
-        ready = true
-        onReady(sessionId)
-        continue
-      }
-
       if (parsed?.isResult && parsed.text) {
+        gotResult = true
         onOutput(sessionId, parsed.text, 'stdout')
         onResult(sessionId, parsed.text)
         continue
@@ -145,12 +131,16 @@ export function createSessionProcess(config: SessionProcessConfig): SessionProce
         continue
       }
 
-      // Forward raw line if we couldn't parse it
-      onOutput(sessionId, line, 'stdout')
+      // Skip init and other system messages
+      if (parsed?.type === 'init') continue
+
+      // Forward unparseable lines as raw output
+      if (!line.startsWith('{')) {
+        onOutput(sessionId, line, 'stdout')
+      }
     }
   })
 
-  // Stream stderr
   proc.stderr?.on('data', (chunk: Buffer) => {
     stderrBuffer += chunk.toString()
     const lines = stderrBuffer.split('\n')
@@ -163,9 +153,7 @@ export function createSessionProcess(config: SessionProcessConfig): SessionProce
     }
   })
 
-  // Handle process exit
   proc.on('close', (code, signal) => {
-    // Flush remaining buffers
     if (stdoutBuffer.trim().length > 0) {
       onOutput(sessionId, stdoutBuffer, 'stdout')
     }
@@ -173,102 +161,116 @@ export function createSessionProcess(config: SessionProcessConfig): SessionProce
       onOutput(sessionId, stderrBuffer, 'stderr')
     }
 
-    alive = false
-    ready = false
-    onExit(sessionId, code, signal)
+    // If we got a result message, treat as success regardless of exit code
+    if (gotResult) {
+      onExit(sessionId, 0, null)
+    } else {
+      onExit(sessionId, code, signal)
+    }
   })
 
   proc.on('error', (err) => {
-    alive = false
-    ready = false
     onOutput(sessionId, `Process error: ${err.message}`, 'stderr')
     onExit(sessionId, 1, null)
   })
 
-  // If no init message within 30s, consider it ready anyway
-  const readyTimeout = setTimeout(() => {
-    if (!ready && alive) {
-      ready = true
-      onReady(sessionId)
-    }
-  }, 30_000)
+  return proc
+}
 
-  function sendMessage(prompt: string): boolean {
-    if (!proc || !alive || !proc.stdin?.writable) {
-      return false
-    }
+// Creates a session handle that can run tasks sequentially
+// Each task spawns a new --print process but reuses the session ID
+export function createSessionProcess(
+  sessionId: string,
+  projectDir: string,
+  onOutput: ProcessOutputCallback,
+  onResult: ProcessResultCallback,
+  onExit: ProcessExitCallback,
+): SessionProcess {
+  const claudeSessionId = randomUUID()
+  let currentProc: ChildProcess | null = null
+  let busy = false
 
-    try {
-      const message = JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: prompt,
-        },
-      })
-      proc.stdin.write(message + '\n')
-      return true
-    } catch {
-      return false
-    }
+  function runTask(prompt: string): boolean {
+    if (busy) return false
+
+    busy = true
+    currentProc = runTaskProcess({
+      sessionId,
+      projectDir,
+      prompt,
+      onOutput,
+      onResult,
+      onExit: (sid, code, signal) => {
+        busy = false
+        currentProc = null
+        onExit(sid, code, signal)
+      },
+    })
+
+    return true
   }
 
   async function stop(): Promise<void> {
-    clearTimeout(readyTimeout)
+    if (!currentProc) return
 
-    if (!proc || !alive) return
-
-    // Try graceful close first
     try {
-      if (proc.stdin?.writable) {
-        proc.stdin.end()
-      }
-      proc.kill('SIGTERM')
+      currentProc.kill('SIGTERM')
     } catch {
-      // Process may have already exited
+      // Already dead
     }
 
-    // Force kill after grace period
     await new Promise<void>((resolve) => {
-      const forceKillTimer = setTimeout(() => {
+      const timer = setTimeout(() => {
         try {
-          proc?.kill('SIGKILL')
+          currentProc?.kill('SIGKILL')
         } catch {
           // Already dead
         }
         resolve()
       }, KILL_GRACE_MS)
 
-      proc?.on('close', () => {
-        clearTimeout(forceKillTimer)
+      currentProc?.on('close', () => {
+        clearTimeout(timer)
         resolve()
       })
     })
+
+    busy = false
+    currentProc = null
   }
 
   function kill(): void {
-    clearTimeout(readyTimeout)
-    if (!proc || !alive) return
+    if (!currentProc) return
 
     try {
-      proc.kill('SIGKILL')
+      currentProc.kill('SIGKILL')
     } catch {
       // Already dead
     }
+
+    busy = false
+    currentProc = null
   }
 
   function isAlive(): boolean {
-    return alive
+    // Session is always "alive" — it's a logical session, not a persistent process
+    return true
+  }
+
+  function isBusy(): boolean {
+    return busy
   }
 
   return {
     sessionId,
+    claudeSessionId,
     get pid() {
-      return proc?.pid
+      return currentProc?.pid
     },
-    sendMessage,
+    runTask,
     stop,
     kill,
     isAlive,
+    isBusy,
   }
 }

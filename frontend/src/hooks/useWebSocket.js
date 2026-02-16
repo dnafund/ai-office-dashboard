@@ -16,7 +16,7 @@ const MAX_DELAY = 30000
 const MAX_OUTPUT_LINES = 1000
 
 export function useWebSocket() {
-  const [data, setData] = useState({ teams: [], activity: [], tasks: [], sessions: [] })
+  const [data, setData] = useState({ teams: [], activity: [], tasks: [], sessions: [], projects: [] })
   const [connected, setConnected] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
   const [executions, setExecutions] = useState(new Map())
@@ -49,7 +49,13 @@ export function useWebSocket() {
           const msg = JSON.parse(event.data)
 
           if (msg.type === 'update') {
-            setData({ teams: msg.teams ?? [], activity: msg.activity ?? [], tasks: msg.tasks ?? [], sessions: msg.sessions ?? [] })
+            setData({
+              teams: msg.teams ?? [],
+              activity: msg.activity ?? [],
+              tasks: msg.tasks ?? [],
+              sessions: msg.sessions ?? [],
+              projects: msg.projects ?? [],
+            })
             if (msg.sessions) setSessions(msg.sessions)
             setLastUpdated(msg.timestamp ? new Date(msg.timestamp) : new Date())
             return

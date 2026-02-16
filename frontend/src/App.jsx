@@ -9,6 +9,7 @@ import { ActivityFeed } from './components/ui/ActivityFeed.jsx'
 import { AgentPanel } from './components/ui/AgentPanel.jsx'
 import { TaskPanel } from './components/ui/TaskPanel.jsx'
 import { AgentOutputPanel } from './components/ui/AgentOutputPanel.jsx'
+import { ProjectPanel } from './components/ui/ProjectPanel.jsx'
 import { setGlobalRoomOverride } from './components/office/Agent.js'
 
 export function App() {
@@ -44,6 +45,7 @@ export function App() {
   const teams = data.teams ?? []
   const activity = data.activity ?? []
   const tasks = data.tasks ?? []
+  const projects = data.projects ?? []
 
   return (
     <Layout>
@@ -53,7 +55,7 @@ export function App() {
         onRoomCommand={handleRoomCommand}
       />
 
-      <div className="flex-1 relative">
+      <div className="relative w-full" style={{ aspectRatio: '3 / 2' }}>
         <OfficeCanvas
           teams={teams}
           tasks={tasks}
@@ -89,6 +91,7 @@ export function App() {
       </div>
 
       {/* Bottom panels */}
+      <ProjectPanel projects={projects} />
       <AgentPanel teams={teams} connected={connected} />
       <TaskPanel
         tasks={tasks}
@@ -97,6 +100,7 @@ export function App() {
         outputHistory={outputHistory}
         onViewOutput={handleViewOutput}
         sessions={sessions}
+        projects={projects}
       />
       {viewingOutput && (
         <AgentOutputPanel
@@ -109,7 +113,7 @@ export function App() {
         />
       )}
       <ActivityFeed activity={activity} />
-      <StatusBar teams={teams} connected={connected} />
+      <StatusBar teams={teams} connected={connected} sessions={sessions} projects={projects} />
     </Layout>
   )
 }

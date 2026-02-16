@@ -1,6 +1,6 @@
-// session-pool.ts — Pool of warm Claude CLI sessions
-// Manages spawning, pre-warming, health checks, idle cleanup
-// Delegates process lifecycle to session-process.ts
+// session-pool.ts — Pool of logical Claude sessions
+// Each session can run one task at a time (spawns a --print process per task)
+// Sessions are lightweight handles — no persistent processes when idle
 
 import { randomUUID } from 'node:crypto'
 import { createSessionProcess, type SessionProcess } from './session-process.js'
@@ -10,16 +10,12 @@ import type { SessionInfo } from './types.js'
 interface PoolConfig {
   readonly minPoolSize: number
   readonly maxPoolSize: number
-  readonly idleTimeoutMs: number
-  readonly healthCheckIntervalMs: number
   readonly projectDir: string
 }
 
 const DEFAULT_CONFIG: PoolConfig = {
   minPoolSize: 1,
   maxPoolSize: 5,
-  idleTimeoutMs: 15 * 60 * 1000,
-  healthCheckIntervalMs: 30 * 1000,
   projectDir: process.cwd(),
 }
 
@@ -54,121 +50,68 @@ export function createSessionPool(createConfig: PoolCreateConfig) {
   }
 
   const processes = new Map<string, SessionProcess>()
-  let healthCheckTimer: ReturnType<typeof setInterval> | null = null
   let shuttingDown = false
 
   function notifyChange(): void {
     onSessionChange?.()
   }
 
-  function replenishPool(): void {
+  function createSession(): SessionInfo {
+    const sessionId = randomUUID()
+    const info = registry.register(sessionId, poolConfig.projectDir)
+
+    const proc = createSessionProcess(
+      sessionId,
+      poolConfig.projectDir,
+      onOutput,
+      (sid, _resultText) => {
+        // Task completed — notify before releasing
+        onTaskComplete(sid)
+        registry.releaseTask(sid)
+        notifyChange()
+      },
+      (sid, exitCode, _signal) => {
+        // Process exited (task done or failed)
+        const session = registry.getSession(sid)
+        if (session?.state === 'busy') {
+          // Task failed without result
+          onTaskComplete(sid)
+          registry.releaseTask(sid)
+          notifyChange()
+        }
+      },
+    )
+
+    processes.set(sessionId, proc)
+
+    // Sessions are immediately ready (no persistent process)
+    registry.updateState(sessionId, 'idle')
+    notifyChange()
+
+    return { ...info, state: 'idle' }
+  }
+
+  function ensureMinPool(): void {
     if (shuttingDown) return
 
     const idleCount = registry.getIdleCount()
     const totalCount = registry.getSessionCount()
 
     if (idleCount < poolConfig.minPoolSize && totalCount < poolConfig.maxPoolSize) {
-      const toSpawn = Math.min(
+      const toCreate = Math.min(
         poolConfig.minPoolSize - idleCount,
         poolConfig.maxPoolSize - totalCount
       )
 
-      for (let i = 0; i < toSpawn; i++) {
-        spawnNew().catch(() => {
-          // Best effort pre-warming
-        })
+      for (let i = 0; i < toCreate; i++) {
+        createSession()
       }
     }
-  }
-
-  function handleSessionReady(sessionId: string): void {
-    const session = registry.getSession(sessionId)
-    if (!session) return
-
-    // Only transition to idle if still in starting state
-    if (session.state === 'starting') {
-      registry.updateState(sessionId, 'idle')
-      notifyChange()
-    }
-  }
-
-  function handleSessionResult(sessionId: string, _resultText: string): void {
-    const session = registry.getSession(sessionId)
-    if (!session) return
-
-    // Release the task → session becomes idle
-    registry.releaseTask(sessionId)
-    onTaskComplete(sessionId)
-    notifyChange()
-
-    // Replenish pool if needed
-    replenishPool()
-  }
-
-  function handleSessionExit(
-    sessionId: string,
-    _exitCode: number | null,
-    _signal: string | null
-  ): void {
-    processes.delete(sessionId)
-    registry.updateState(sessionId, 'dead')
-    registry.unregister(sessionId)
-    notifyChange()
-
-    // Replenish pool after a session dies
-    replenishPool()
-  }
-
-  function runHealthCheck(): void {
-    const now = Date.now()
-    const allSessions = registry.getAllSessions()
-
-    for (const session of allSessions) {
-      const proc = processes.get(session.sessionId)
-
-      // Check if process is dead but registry thinks it's alive
-      if (proc && !proc.isAlive() && session.state !== 'dead') {
-        processes.delete(session.sessionId)
-        registry.updateState(session.sessionId, 'dead')
-        registry.unregister(session.sessionId)
-        notifyChange()
-        continue
-      }
-
-      // Reap idle sessions past timeout
-      if (
-        session.state === 'idle' &&
-        now - session.lastActiveAt > poolConfig.idleTimeoutMs &&
-        registry.getIdleCount() > poolConfig.minPoolSize
-      ) {
-        const idleProc = processes.get(session.sessionId)
-        if (idleProc) {
-          registry.updateState(session.sessionId, 'stopping')
-          notifyChange()
-          idleProc.stop().then(() => {
-            processes.delete(session.sessionId)
-            registry.unregister(session.sessionId)
-            notifyChange()
-          }).catch(() => {
-            processes.delete(session.sessionId)
-            registry.unregister(session.sessionId)
-            notifyChange()
-          })
-        }
-      }
-    }
-
-    replenishPool()
   }
 
   async function start(): Promise<void> {
     shuttingDown = false
-
-    // Start health check interval
-    healthCheckTimer = setInterval(runHealthCheck, poolConfig.healthCheckIntervalMs)
-
-    // Pre-warm pool
-    replenishPool()
+    ensureMinPool()
   }
 
   async function spawnNew(): Promise<SessionInfo> {
@@ -176,33 +119,14 @@ export function createSessionPool(createConfig: PoolCreateConfig) {
       throw new Error(`Max pool size (${poolConfig.maxPoolSize}) reached`)
     }
 
-    const sessionId = randomUUID()
-    const info = registry.register(sessionId, poolConfig.projectDir)
-
-    const proc = createSessionProcess({
-      sessionId,
-      projectDir: poolConfig.projectDir,
-      onOutput,
-      onReady: handleSessionReady,
-      onResult: handleSessionResult,
-      onExit: handleSessionExit,
-    })
-
-    processes.set(sessionId, proc)
-
-    if (proc.pid) {
-      registry.updatePid(sessionId, proc.pid)
-    }
-
-    notifyChange()
-    return info
+    return createSession()
   }
 
   function acquireIdle(): SessionInfo | null {
     const idleSessions = registry.getIdleSessions()
     if (idleSessions.length === 0) return null
 
-    // Pick the most recently active idle session
+    // Pick most recently active
     const sorted = [...idleSessions].sort(
       (a, b) => b.lastActiveAt - a.lastActiveAt
     )
@@ -215,7 +139,7 @@ export function createSessionPool(createConfig: PoolCreateConfig) {
     if (idle) return idle
 
     if (registry.getSessionCount() < poolConfig.maxPoolSize) {
-      return spawnNew()
+      return createSession()
     }
 
     return null
@@ -225,7 +149,11 @@ export function createSessionPool(createConfig: PoolCreateConfig) {
     const proc = processes.get(sessionId)
     if (!proc) return false
 
-    return proc.sendMessage(prompt)
+    const sent = proc.runTask(prompt)
+    if (sent) {
+      registry.touch(sessionId)
+    }
+    return sent
   }
 
   function cancelSession(sessionId: string): boolean {
@@ -233,29 +161,27 @@ export function createSessionPool(createConfig: PoolCreateConfig) {
     if (!proc) return false
 
     proc.kill()
+    registry.releaseTask(sessionId)
+    notifyChange()
     return true
   }
 
   async function stopSession(sessionId: string): Promise<void> {
     const proc = processes.get(sessionId)
-    if (!proc) return
-
-    registry.updateState(sessionId, 'stopping')
-    notifyChange()
-
-    await proc.stop()
-    processes.delete(sessionId)
+    if (proc) {
+      await proc.stop()
+      processes.delete(sessionId)
+    }
+    registry.updateState(sessionId, 'dead')
     registry.unregister(sessionId)
     notifyChange()
+
+    // Replenish pool
+    ensureMinPool()
   }
 
   async function shutdown(): Promise<void> {
     shuttingDown = true
-
-    if (healthCheckTimer) {
-      clearInterval(healthCheckTimer)
-      healthCheckTimer = null
-    }
 
     const stopPromises = Array.from(processes.values()).map(async (proc) => {
       try {

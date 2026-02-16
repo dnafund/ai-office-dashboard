@@ -55,7 +55,19 @@ export interface DashboardState {
   readonly teams: readonly TeamState[]
   readonly activity: readonly ActivityMessage[]
   readonly tasks: readonly TaskState[]
+  readonly sessions: readonly SessionInfo[]
+  readonly projects: readonly ProjectConfig[]
   readonly timestamp: number
+}
+
+// ─── Project types ─────────────────────────────────────────
+
+export interface ProjectConfig {
+  readonly id: string
+  readonly name: string
+  readonly path: string
+  readonly color: string
+  readonly createdAt: number
 }
 
 // ─── Session types ──────────────────────────────────────────
@@ -86,6 +98,7 @@ export interface DispatchRequest {
   readonly agentName: string
   readonly prompt: string
   readonly preferNewSession?: boolean
+  readonly projectId?: string
 }
 
 // ─── Execution types ────────────────────────────────────────
@@ -140,6 +153,7 @@ export interface WsMessage {
   readonly activity?: readonly ActivityMessage[]
   readonly tasks?: readonly TaskState[]
   readonly sessions?: readonly SessionInfo[]
+  readonly projects?: readonly ProjectConfig[]
   readonly timestamp?: number
 }
 

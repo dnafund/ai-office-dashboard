@@ -280,23 +280,7 @@ export function OfficeCanvas({ teams, tasks, roomOverride, onAgentHover, onAgent
     return () => { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp) }
   }, [controlGroups])
 
-  // Scroll zoom
-  const handleWheel = useCallback((e) => {
-    e.preventDefault()
-    const c = canvasRef.current
-    if (!c) return
-    const r = c.getBoundingClientRect()
-    const sx = (e.clientX - r.left) * (CANVAS_WIDTH / r.width)
-    const sy = (e.clientY - r.top) * (CANVAS_HEIGHT / r.height)
-    cameraRef.current = zoomCamera(cameraRef.current, e.deltaY, sx, sy, CANVAS_WIDTH, CANVAS_HEIGHT)
-  }, [])
-
-  useEffect(() => {
-    const c = canvasRef.current
-    if (!c) return
-    c.addEventListener('wheel', handleWheel, { passive: false })
-    return () => c.removeEventListener('wheel', handleWheel)
-  }, [handleWheel])
+  // Scroll zoom disabled — let page scroll naturally
 
   // Mouse handlers
   const handleMouseDown = useCallback((e) => {
@@ -360,7 +344,7 @@ export function OfficeCanvas({ teams, tasks, roomOverride, onAgentHover, onAgent
   }, [])
 
   return (
-    <div className="relative w-full h-full min-h-[600px]">
+    <div className="relative w-full h-full">
       <canvas
         ref={canvasRef}
         width={CANVAS_WIDTH}
@@ -388,15 +372,6 @@ export function OfficeCanvas({ teams, tasks, roomOverride, onAgentHover, onAgent
           />
         </div>
       )}
-
-      <div className="absolute bottom-4 right-4 z-10">
-        <Minimap
-          agents={minimapAgents}
-          selectedAgents={selectedAgents}
-          cameraState={cameraBounds}
-          onMinimapClick={handleMinimapClick}
-        />
-      </div>
 
       {toast && (
         <div className="absolute top-4 right-4 z-20">
