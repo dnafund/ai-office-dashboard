@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "neural-memory": {
-      "command": "C:\\Python314\\python.exe",
-      "args": ["-m", "neural_memory.mcp"],
+      "command": "nmem-mcp",
+      "args": [],
       "env": {
         "NEURALMEMORY_BRAIN": "ai-office-dashboard"
       }
