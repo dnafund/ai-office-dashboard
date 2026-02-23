@@ -1,0 +1,31 @@
+#!/bin/bash
+# Post-merge: import brain-export.db after git pull
+
+# Check if brain-export.db was updated in this pull
+if git diff HEAD@{1} --name-only 2>/dev/null | grep -q "brain-export.db"; then
+    echo "brain-export.db changed, importing..."
+    
+    REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+    BRAIN=$(grep '^BRAIN=' "$REPO_DIR/scripts/nmem_maintenance.sh" 2>/dev/null | cut -d'"' -f2)
+    
+    if [ -z "$BRAIN" ]; then
+        echo "WARNING: Could not detect brain name, skipping import"
+        exit 0
+    fi
+    
+    BRAIN_DIR="$HOME/.neuralmemory/brains"
+    EXPORT_FILE="$REPO_DIR/brain-export.db"
+    TARGET="$BRAIN_DIR/$BRAIN.db"
+    
+    if [ -f "$EXPORT_FILE" ]; then
+        mkdir -p "$BRAIN_DIR"
+        cp "$TARGET" "$TARGET.bak" 2>/dev/null
+        cp "$EXPORT_FILE" "$TARGET"
+        echo "Imported brain-export.db -> $BRAIN.db"
+        rm -f "$TARGET.bak"
+    else
+        echo "WARNING: brain-export.db not found"
+    fi
+else
+    echo "brain-export.db unchanged, skipping import"
+fi

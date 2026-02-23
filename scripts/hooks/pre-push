@@ -1,0 +1,14 @@
+#!/bin/bash
+# Pre-push: sync neural memory brain DB
+
+echo "Syncing neural memory before push..."
+if [ -f "scripts/nmem_maintenance.sh" ]; then
+    bash scripts/nmem_maintenance.sh
+
+    # Auto-commit brain-export.db if changed
+    if ! git diff --quiet brain-export.db 2>/dev/null; then
+        echo "Brain DB changed, committing..."
+        git add brain-export.db
+        git commit -m "chore: sync brain-export.db" --no-verify
+    fi
+fi

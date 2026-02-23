@@ -1,0 +1,5 @@
+#!/bin/bash
+# Neural Memory auto-capture
+if [ -f "scripts/nmem_commit_store.sh" ]; then
+    bash scripts/nmem_commit_store.sh
+fi
